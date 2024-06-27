@@ -29,16 +29,16 @@ transport_excel_path = "Parameters/transport_parameters.xlsx"
 
 def trucking_costs(transport_state, distance, quantity, interest, excel_path):
     '''
-    calculates the annual cost of transporting hydrogen by truck.
+    calculates the annual cost of transporting resource by truck.
 
     Parameters
     ----------
     transport_state : string
-        state hydrogen is transported in, one of '500 bar', 'LH2', 'LOHC', or 'NH3'.
+        state resource is transported in.
     distance : float
-        distance between hydrogen production site and demand site.
+        distance between production site and demand site.
     quantity : float
-        annual amount of hydrogen to transport.
+        annual amount of resource to transport.
     interest : float
         interest rate on capital investments.
     excel_path : string
@@ -274,8 +274,88 @@ def h2_conversion_stand(final_state, quantity, electricity_costs, heat_costs, in
     else:
         raise NotImplementedError(f'Conversion costs for {final_state} not currently supported.')
 
+
+def mineral_conversion_stand(final_state, quantity, electricity_costs,
+                             diesel_costs, heat_costs, interest):
+    '''
+    calculates the annual cost and electricity and heating demand for converting 
+    mineral concentrate to a given state
+
+    Parameters
+    ----------
+    final_state : string
+        final state to convert concentrate to, one of 'standard condition' or concentrate, 'CuAnode'
+        or 'CuCathode'.
+    quantity : float
+        annual quantity of concentrate to convert in kg.
+    electricity_costs : float
+        unit price for electricity.
+    heat_costs : float
+        unit costs for heat.
+    interest : float
+        interest rate applicable to mineral converter investments.
+
+    Returns
+    -------
+    elec_demand : float
+        annual electricity demand.
+    heat_demand : float
+        annual heat demand.
+    annual_costs : float
+        annual mineral conversion costs.
+
+    '''
+    
+    daily_throughput = quantity/365
+    
+    if final_state != 'CuConcentrate':
+        conversion_parameters = pd.read_excel(conversion_excel_path,
+                                             sheet_name = final_state,
+                                             index_col = 'Parameter'
+                                             ).squeeze('columns')
+
+    if final_state == 'CuConcentrate':
+        elec_demand = 0 
+        heat_demand = 0
+        diesel_demand = 0
+        annual_costs = 0 
+        return elec_demand, heat_demand, diesel_demand, annual_costs
+
+    elif final_state == 'CuAnode' or final_state == 'CuCathode':
+        electricity_unit_demand = conversion_parameters['Electricity demand (kWh per kgCuConc)']
+        diesel_unit_demand = conversion_parameters['Diesel demand (kWh per kgCuConc)']
+
+        capex_quadratic_coefficient = conversion_parameters['Capex quadratic coefficient (euros (kgCuConc)-2)']
+        capex_linear_coefficient = conversion_parameters['Capex linear coefficient (euros per kgCuConc)']
+        capex_constant = conversion_parameters['Capex constant (euros)']
+        opex_plant = conversion_parameters['Opex (% of capex)']
+        plant_lifetime = conversion_parameters['Plant lifetime (a)']
+        
+        heat_demand = 0
+        
+        diesel_demand = diesel_unit_demand * quantity
+        
+        elec_demand = electricity_unit_demand * quantity
+        ##### replace with elec offgrid system optimisation ######
+        # will need location and weather data etc
+        
+        capex_plant = (capex_quadratic_coefficient *(daily_throughput**2)
+                       + capex_linear_coefficient * daily_throughput
+                       + capex_constant)
+
+        annual_costs = ((capex_plant * CRF(interest, plant_lifetime))
+                        + (capex_plant * opex_plant)
+                        + elec_demand * electricity_costs
+                        + diesel_demand * diesel_costs
+                        + heat_demand * heat_costs)
+        return elec_demand, heat_demand, diesel_demand, annual_costs
+
+    else:
+        raise NotImplementedError(f'Conversion costs for {final_state} not currently supported.')
+
+
 def cheapest_trucking_strategy(final_state, quantity, distance, 
-                                elec_costs, heat_costs,interest, 
+                                elec_costs, heat_costs, interest, 
                                 elec_costs_demand, elec_cost_grid = 0.):
     '''
     calculates the lowest-cost state to transport hydrogen by truck
@@ -361,6 +441,97 @@ def cheapest_trucking_strategy(final_state, quantity, distance,
     costs_per_unit = lowest_cost/quantity
     
     return costs_per_unit, cheapest_option
+
+def cheapest_mineral_trucking_strategy(final_state, quantity, distance, 
+                                elec_costs, diesel_costs, heat_costs,
+                                interest, 
+                                elec_costs_demand, elec_cost_grid = 0.):
+    '''
+    calculates the lowest-cost state to transport mineral by truck
+
+    Parameters
+    ----------
+    final_state : string
+        final state for hydrogen demand.
+    quantity : float
+        annual demand for hydrogen in kg.
+    distance : float
+        distance to transport hydrogen.
+    elec_costs : float
+        cost per kWh of electricity at hydrogen production site.
+    heat_costs : float
+        cost per kWh of heat.
+    interest : float
+        interest on conversion and trucking capital investments (not including roads).
+    elec_costs_demand : float
+        cost per kWh of electricity at hydrogen demand site.
+    elec_cost_grid : float
+        grid electricity costs that pipeline compressors pay. Default 0.
+    
+    Returns
+    -------
+    costs_per_unit : float
+        storage, conversion, and transport costs for the cheapest trucking option.
+    cheapest_option : string
+        the lowest-cost state in which to transport hydrogen by truck.
+
+    '''
+    
+    if final_state == "CuAnode":
+        # convert to CuAnode then truck
+        at = (mineral_conversion_stand(final_state, quantity, elec_costs,
+                                      diesel_costs, heat_costs, interest)[2]
+              + trucking_costs('CuAnode', distance, quantity, interest,
+                               transport_excel_path))
+        # truck then convert to CuAnode
+        ta = (trucking_costs('CuConcentrate', distance, quantity, interest,
+                         transport_excel_path)
+              + mineral_conversion_stand(final_state, quantity, elec_costs_demand,
+                                            diesel_costs, heat_costs, interest)[2])
+    
+        lowest_cost = np.nanmin([at, ta])
+        
+        if at == lowest_cost:
+            cheapest_option = 'CuAnode'
+        elif ta == lowest_cost:
+            cheapest_option = 'CuConcentrate'
+
+        costs_per_unit = lowest_cost / quantity
+        
+        return costs_per_unit, cheapest_option
+        
+        
+    elif final_state == "CuCathode":
+       # convert to CuAnode then truck
+       ct = (mineral_conversion_stand(final_state, quantity, elec_costs,
+                                     diesel_costs, heat_costs, interest)[2]
+             + trucking_costs('CuCathode', distance, quantity, interest,
+                              transport_excel_path))
+       # truck then convert to CuAnode
+       tc = (trucking_costs('CuConcentrate', distance, quantity, interest,
+                        transport_excel_path)
+             + mineral_conversion_stand(final_state, quantity, elec_costs_demand,
+                                           diesel_costs, heat_costs, interest)[2])
+   
+       lowest_cost = np.nanmin([ct, tc])
+       
+       if ct == lowest_cost:
+           cheapest_option = 'CuCathode'
+       elif tc == lowest_cost:
+           cheapest_option = 'CuConcentrate'
+
+       costs_per_unit = lowest_cost / quantity
+       
+       return costs_per_unit, cheapest_option
+   
+    elif final_state == 'CuConcentrate':
+        lowest_cost = trucking_costs('CuConcentrate', distance, quantity, interest,
+                         transport_excel_path)
+        cheapest_option = 'CuConcentrate'
+        costs_per_unit = lowest_cost / quantity
+        return costs_per_unit, cheapest_option
+    else:
+        raise NotImplementedError(f'Conversion costs for {final_state} not currently supported.')
 
     
     

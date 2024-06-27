@@ -135,15 +135,15 @@ def optimize_hydrogen_plant(wind_potential, pv_potential, times, demand_profile,
     n.set_snapshots(times)
 
     # Import the design of the H2 plant into the network
-    n.import_from_csv_folder("Parameters/Basic_H2_plant")
+    n.import_from_csv_folder("Parameters/Basic_MinX_plant")
 
     # Import demand profile
-    # Note: All flows are in MW or MWh, conversions for hydrogen done using HHVs. Hydrogen HHV = 39.4 MWh/t
-    # hydrogen_demand = pd.read_excel(demand_path,index_col = 0) # Excel file in kg hydrogen, convert to MWh
+    # Note: All flows are in MW or MWh, conversions for Concentrate done using 0.717 kWh per kg
+
     n.add('Load',
-          'Hydrogen demand',
-          bus = 'Hydrogen',
-          p_set = demand_profile['Demand']/1000*39.4,
+          'Concentrate demand',
+          bus = 'Power',
+          p_set = (demand_profile['Demand']*0.717)/1000,
           )
 
     # Send the weather data to the model
@@ -171,12 +171,12 @@ def optimize_hydrogen_plant(wind_potential, pv_potential, times, demand_profile,
            )
     # Output results
 
-    lcoh = n.objective/(n.loads_t.p_set.sum()[0]/39.4*1000) # convert back to kg H2
+    lcoh = n.objective/(n.loads_t.p_set.sum()[0]/0.717*1000) # convert back to kg 
     wind_capacity = n.generators.p_nom_opt['Wind']
     solar_capacity = n.generators.p_nom_opt['Solar']
-    electrolyzer_capacity = n.links.p_nom_opt['Electrolysis']
+    electrolyzer_capacity = np.nan # n.links.p_nom_opt['Electrolysis']
     battery_capacity = n.storage_units.p_nom_opt['Battery']
-    h2_storage = n.stores.e_nom_opt['Compressed H2 Store']
+    h2_storage = np.nan # n.stores.e_nom_opt['Compressed H2 Store']
     print(lcoh)
     return lcoh, wind_capacity, solar_capacity, electrolyzer_capacity, battery_capacity, h2_storage
 

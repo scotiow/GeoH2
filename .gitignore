@@ -5,3 +5,6 @@ Plots/
 **/.DS_Store
 .DS_Store
 Temp/
+*.pyc
+*.pyc
+/Data
