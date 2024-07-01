@@ -9,7 +9,7 @@ import pandas as pd
 import json
 import geopandas as gpd
 import numpy as np
-import geopy
+import geopy.distance
 import atlite
 import pypsa
 import p_MinX_aux as aux
@@ -108,6 +108,40 @@ def get_pv_wind_profiles(hexagons_gdf,
     wind_profile = wind_profile.rename(dict(dim_0='hexagon'))
     
     return pv_profile, wind_profile
+
+
+def load_hexagons(country_parameters):
+    """
+    Load hexagons following the GeoH2_prep_data. You do not need to run
+    assign_countries.
+
+    Returns
+    -------
+    None.
+
+    """
+    # Load the Hexagon file in geopandas
+    hexagons = gpd.read_file('Data/hex_final.geojson')
+    hexagons.to_crs(epsg=4326, inplace=True)
+    # the use of centroid throws a UserWarning when a geographic CRS (e.g. EPSG=4326) is used.
+    # ideally you should convert to a projected crs (ideally with equal area cylindrical?) then back again.
+    warnings.filterwarnings('ignore', category=UserWarning)
+    hexagon_centroids = gpd.GeoDataFrame(geometry=hexagons.centroid, index=hexagons.index, crs=hexagons.crs)
+    
+    warnings.filterwarnings('ignore', category=FutureWarning)
+    # =============================================================================
+    #     https://stackoverflow.com/questions/76548222/how-to-get-maps-to-geopandas-after-datasets-are-removed
+    # =============================================================================
+    world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres')) # may need to switch to higher res
+    countries = world.drop(columns=['pop_est', 'continent', 'iso_a3', 'gdp_md_est'])
+    countries = countries.rename(columns={'name':'country'})
+    hexagons["country"] = gpd.sjoin(hexagon_centroids, countries, op='intersects').country # changed from "within"
+    hexagons.to_file('Data/hexagons_with_country.geojson', driver='GeoJSON')
+    
+    hexagons['country'] = hexagons['country'].apply(lambda x: x if x in country_parameters.index.values else 'Other')
+    
+    return hexagons
+    
 
 def load_hexagons_temporary(country_parameters, 
                             filepath='Data/hexagons_with_country.geojson'):
@@ -421,7 +455,43 @@ def demand_schedule(quantity, transport_state,
     quantity_per_delivery = quantity / annual_deliveries
     index = pd.date_range(start_date, end_date, periods=annual_deliveries)
     trucking_demand_schedule = pd.DataFrame(quantity_per_delivery, index=index, columns = ['Demand'])
+    return trucking_demand_schedule
     trucking_hourly_demand_schedule = trucking_demand_schedule.resample('H').sum().fillna(0.)
+
+    # # schedule for pipeline
+    # index = pd.date_range(start_date, end_date, freq = 'H')
+    # pipeline_hourly_quantity = quantity/index.size
+    # pipeline_hourly_demand_schedule = pd.DataFrame(pipeline_hourly_quantity, index=index,  columns = ['Demand'])
+
+    return trucking_hourly_demand_schedule
+
+
+def demand_schedule_constant(quantity, transport_state,
+                    transport_excel_path="Parameters/transport_parameters.xlsx",
+                    weather_excel_path="Parameters/weather_parameters.xlsx"):
+    '''
+    calculates  a constant hourly product demand if storage between production and shipping not important
+
+   
+    '''
+    # transport_parameters = pd.read_excel(transport_excel_path,
+    #                                      sheet_name = transport_state,
+    #                                      index_col = 'Parameter'
+    #                                      ).squeeze('columns')
+    weather_parameters = pd.read_excel(weather_excel_path,
+                                       index_col = 'Parameters',
+                                       ).squeeze('columns')
+    # truck_capacity = transport_parameters['Net capacity (kg)']
+    start_date = weather_parameters['Start date']
+    end_date = weather_parameters['End date (not inclusive)']
+
+    # schedule for trucking
+    # annual_deliveries = quantity / truck_capacity
+    # quantity_per_delivery = quantity / annual_deliveries
+    
+    quantity_per_hour = quantity / (365*24)
+    index = pd.date_range(start_date, end_date, freq="H")
+    trucking_hourly_demand_schedule = pd.DataFrame(quantity_per_hour, index=index, columns = ['Demand'])
 
     # # schedule for pipeline
     # index = pd.date_range(start_date, end_date, freq = 'H')
@@ -492,5 +562,41 @@ def optimize_facility(wind_potential, pv_potential, times, demand_profile,
     # electrolyzer_capacity = np.nan # n.links.p_nom_opt['Electrolysis']
     battery_capacity = n.storage_units.p_nom_opt['Battery']
     # h2_storage = np.nan # n.stores.e_nom_opt['Compressed H2 Store']
-    print(lcom)
+    # print(lcom)
     return lcom, wind_capacity, solar_capacity, battery_capacity
+
+
+def mineral_conversion_stand(final_state, quantity, interest,
+                             conversion_excel_path="Parameters/conversion_parameters.xlsx"):
+    '''
+    calculates the annual cost of facility (excluding energy) 
+    for converting mineral concentrate to a given state
+    '''
+    
+    daily_throughput = quantity/365
+    
+    conversion_parameters = pd.read_excel(conversion_excel_path,
+                                         sheet_name = final_state,
+                                         index_col = 'Parameter'
+                                         ).squeeze('columns')
+
+    if final_state == 'CuConcentrate':
+        annual_costs = 0 
+        return annual_costs
+
+    else:
+        capex_quadratic_coefficient = conversion_parameters['Capex quadratic coefficient (euros (kg product)-2)']
+        capex_linear_coefficient = conversion_parameters['Capex linear coefficient (euros per kg product)']
+        capex_constant = conversion_parameters['Capex constant (euros)']
+        opex_plant = conversion_parameters['Opex (% of capex)']
+        plant_lifetime = conversion_parameters['Plant lifetime (a)']
+        
+       
+        
+        capex_plant = (capex_quadratic_coefficient *(daily_throughput**2)
+                       + capex_linear_coefficient * daily_throughput
+                       + capex_constant)
+
+        annual_costs = ((capex_plant * CRF(interest, plant_lifetime))
+                        + (capex_plant * opex_plant))
+        return annual_costs
