@@ -18,7 +18,10 @@ import warnings
 import contextlib
 import sys
 import os
+import math
 import logging
+import xarray as xr
+
 logging.basicConfig(level=logging.ERROR)
 
 # Define a context manager to suppress print statements and stderr
@@ -563,7 +566,165 @@ def optimize_facility(wind_potential, pv_potential, times, demand_profile,
     battery_capacity = n.storage_units.p_nom_opt['Battery']
     # h2_storage = np.nan # n.stores.e_nom_opt['Compressed H2 Store']
     # print(lcom)
-    return lcom, wind_capacity, solar_capacity, battery_capacity
+    
+    if math.isnan(lcom):
+        # print("nan wind len: {}".format(wind_potential.shape))
+        # print("nan demand len: {}".format(demand_profile.shape))
+        pass
+        # print("demand: {}".format(demand_profile['Demand'].sum()),
+        #       "pv lim: {}".format(pv_max_capacity),
+        #       "pv CF: {}".format(pv_potential.mean().item()),
+        #       "wind lim: {}".format(wind_max_capacity),
+        #       "wind CF: {}".format(wind_potential.mean().item()),
+        #       )
+        # print("Annual demand (MWh) {}".format((demand_profile['Demand'].sum() * elec_kWh_per_kg) / 1000))
+        # print("Annual solar (MWh) {}".format(24*365*pv_max_capacity*pv_potential.mean().item()))
+        # print("Annual wind (MWh) {}".format(24*365*wind_max_capacity*wind_potential.mean().item()))
+    else:
+        print("success wind len: {}".format(wind_potential.shape))
+        print("success demand len: {}".format(demand_profile.shape))
+    return lcom, wind_capacity, solar_capacity, battery_capacity, n
+
+
+def optimize_facility2(wind_potential, pv_potential, times, demand_profile,
+                      demand_state, elec_kWh_per_kg, wind_max_capacity, pv_max_capacity, 
+                            country_series):
+    '''
+   Optimizes the size of green processing facility components based on renewable potential and country parameters. 
+
+    
+
+    '''
+    
+    solar = pv_potential.to_series().loc[:demand_profile.index[-1]]
+    wind = wind_potential.to_series().loc[:demand_profile.index[-1]]
+    load = demand_profile["Demand"]
+    
+    
+    generator_params = pd.read_csv("Parameters/Basic_MinX_plant/generators.csv",
+                                   index_col=0)
+    storage_params = pd.read_csv("Parameters/Basic_MinX_plant/storage_units.csv",
+                                   index_col=0)
+
+    # Set up network
+    # Import a generic network
+    n = pypsa.Network()
+
+    # Set the time values for the network
+    n.set_snapshots(demand_profile.index)
+
+    # Add buses
+    n.add("Bus", "AC_bus")
+    n.add("Bus", "DC_bus")
+    
+    # Import demand profile
+    # Note: All flows are in MW or MWh, conversions for Concentrate done using 0.717 kWh per kg
+    
+    # add the load
+    n.add('Load',
+          f'{demand_state} demand',
+          bus = 'AC_bus',
+          p_set = (load * elec_kWh_per_kg) / 1000,
+          )
+    
+    # add generation
+    n.add("Generator",
+            "solar",
+            bus="DC_bus",
+            p_nom_extendable=True,
+            carrier="solar",
+            p_max_pu=solar,
+            p_nom_max=pv_max_capacity)
+
+    n.add("Generator",
+            "wind",
+            bus="DC_bus",
+            p_nom_extendable=True,
+            carrier="wind",
+            p_max_pu=wind,
+            p_nom_max=wind_max_capacity)
+    
+    # # Send the weather data to the model
+    # n.generators_t.p_max_pu['wind'] = wind_potential
+    # n.generators_t.p_max_pu['solar'] = pv_potential
+
+    # # specify maximum capacity based on land use
+    # n.generators.loc['wind','p_nom_max'] = wind_max_capacity
+    # n.generators.loc['solar','p_nom_max'] = pv_max_capacity
+
+    # Add battery storage
+    n.add("StorageUnit",
+            "battery",
+            bus="DC_bus",
+            p_nom_extendable=True,
+            cyclic_state_of_charge=True,
+            state_of_charge_initial=0.5,
+            max_hours=4)
+    
+    # Add converters
+    n.add("Link",
+            "inverter",
+            bus0="DC_bus",
+            bus1="AC_bus",
+            p_nom_extendable=True,
+            efficiency=0.95)
+    
+    n.add("Link",
+            "rectifier",
+            bus0="AC_bus",
+            bus1="DC_bus",
+            p_nom_extendable=True,
+            efficiency=0.95)  # Example efficiency
+
+    # Set costs
+    n.generators.loc["solar", "capital_cost"] = (generator_params.loc["Solar", "capital_cost"]
+                                                 * CRF(country_series['Solar interest rate'], country_series['Solar lifetime (years)']))
+    n.generators.loc["wind", "capital_cost"] = (generator_params.loc["Wind", "capital_cost"]
+                                                 * CRF(country_series['Wind interest rate'], country_series['Wind lifetime (years)']))
+    n.storage_units.loc["battery", "capital_cost"] = (storage_params.loc["Battery", "capital_cost"]
+                                                      * CRF(country_series['Solar interest rate'], country_series['Solar lifetime (years)']))
+    n.links.loc["inverter", "capital_cost"] = (50
+                                                 * CRF(country_series['Plant interest rate'], country_series['Plant lifetime (years)']))
+    n.links.loc["rectifier", "capital_cost"] = (50
+                                                 * CRF(country_series['Plant interest rate'], country_series['Plant lifetime (years)']))
+   
+    # Solve the model
+    solver = 'gurobi'
+    with suppress_output():
+        n.lopf(n.snapshots,
+               solver_name=solver,
+               solver_options = {'OutputFlag': 0},
+               pyomo=False,
+               )
+    
+
+
+
+# Output results
+
+    lcom = n.objective/(n.loads_t.p_set.sum()[0] / elec_kWh_per_kg * 1000) # convert back to kg 
+    wind_capacity = n.generators.p_nom_opt['wind']
+    solar_capacity = n.generators.p_nom_opt['solar']
+    # electrolyzer_capacity = np.nan # n.links.p_nom_opt['Electrolysis']
+    battery_capacity = n.storage_units.p_nom_opt['battery']
+    # h2_storage = np.nan # n.stores.e_nom_opt['Compressed H2 Store']
+    # print(lcom)
+    
+    if math.isnan(lcom):
+        pass
+        # print("Scot Annual demand (set) {}:".format((demand_profile['Demand'].sum() * elec_kWh_per_kg) / 1000))
+        # print("Scot Annual demand (opt) {}:".format((n.loads_t.p_set.sum()[0].sum())))
+        # print(n.generators_t.p)
+        # print("demand: {}".format(demand_profile['Demand'].sum()),
+        #       "pv lim: {}".format(pv_max_capacity),
+        #       "pv CF: {}".format(pv_potential.mean().item()),
+        #       "wind lim: {}".format(wind_max_capacity),
+        #       "wind CF: {}".format(wind_potential.mean().item()),
+        #       )
+        # print("Annual demand (MWh) {}".format((demand_profile['Demand'].sum() * elec_kWh_per_kg) / 1000))
+        # print("Annual solar (MWh) {}".format(24*365*pv_max_capacity*pv_potential.mean().item()))
+        # print("Annual wind (MWh) {}".format(24*365*wind_max_capacity*wind_potential.mean().item()))
+    return lcom, wind_capacity, solar_capacity, battery_capacity, n
 
 
 def mineral_conversion_stand(final_state, quantity, interest,

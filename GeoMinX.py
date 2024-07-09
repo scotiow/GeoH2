@@ -275,7 +275,8 @@ if __name__=='__main__':
                 (lcom,
                  wind_capacity,
                  solar_capacity,
-                 battery_capacity) = gmx.optimize_facility(wind_profile.sel(hexagon = hix),
+                 battery_capacity,
+                 network) = gmx.optimize_facility2(wind_profile.sel(hexagon = hix),
                                         pv_profile.sel(hexagon = hix),
                                         wind_profile.time,
                                         demand_trucking_schedule,
@@ -285,6 +286,7 @@ if __name__=='__main__':
                                         hexagons_gdf.loc[hix,'theo_pv'],
                                         country_parameters.loc[hexagons_gdf.loc[hix, "country"]],
                                         )
+                
                     # if not enough renewables:
                     # set to nan or use grid
             
