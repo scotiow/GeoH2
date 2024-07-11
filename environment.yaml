@@ -1,28 +1,32 @@
-name: geoh2
+name: GeoMinX
 channels:
-  - defaults
   - conda-forge
+  - defaults
 
 dependencies:
   - python
-  - atlite=0.2.10
-  - cartopy
-  - gdal=3
-  - geopy
   - geopandas
-  - matplotlib
+  - pandas
   - numpy
+  - tqdm
+  - shapely
+  - geopy
+  - atlite
+  - pypsa
+  - matplotlib
+  - cartopy
+  - gdal
   - openpyxl
-  - pandas = 1.5.3
-  - pip
-  - pypsa = 0.21.3
-  - shapely = 1.8.4
-  - xarray = 0.20.1
-
-  - pip:
-    - cdsapi
-    - fiona
-    - pyproj
-    - rasterio!= 1.2.10
-    - pillow == 9.2.0
+  - xarray
+  - fiona
+  - pyproj
+  - rasterio
+  - pillow
+  - cdsapi
+  - contextily
+  - requests
+  - aiohttp
+  - geodatasets
+  - unidecode
+  - gurobi::gurobi
 
