@@ -21,6 +21,8 @@ import os
 import math
 import logging
 import xarray as xr
+import geodatasets as gds
+from unidecode import unidecode
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -37,6 +39,83 @@ def suppress_output():
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+
+def clean_country_name(country_name):
+    # Get country names without accents, spaces, apostrophes, or periods for loading files
+    country_name_clean = unidecode(country_name)
+    country_name_clean = country_name_clean.replace(" ", "")
+    country_name_clean = country_name_clean.replace(".", "")
+    country_name_clean = country_name_clean.replace("'", "")
+    return country_name_clean
+
+def combine_glaes_spider(country_names, spider_hex_path=None,
+                         glaes_wind_path=None, glaes_pv_path=None):
+    """
+    Adapted from GeoH2-data-prep: https://github.com/ClimateCompatibleGrowth/GeoH2-data-prep
+
+    Returns
+    -------
+    None.
+
+    """
+    # create a for loop that can loop through a list of country names
+    for country_name in country_names:
+
+        print(f"Combining GLAES and SPIDER data for {country_name}!")
+
+        country_name_clean = clean_country_name(country_name)
+
+        # Get paths
+        if isinstance(spider_hex_path, type(None)):
+            spider_hex_path = os.path.join("Data", "Spider", f"{country_name_clean}_hex.geojson")
+        if isinstance(glaes_wind_path, type(None)):
+            glaes_wind_path = os.path.join("Data", "GLAES", f"{country_name_clean}_turbine_placements.shp")
+        if isinstance(glaes_pv_path, type(None)):
+            glaes_pv_path = os.path.join("Data", "GLAES", f"{country_name_clean}_pv_placements.shp")
+        save_path = os.path.join("Data", f"{country_name_clean}_hex_GeoXin.geojson")
+
+        # Load all files and convert all to the country's CRS
+        print(" - Loading files...")
+        hexagons = gpd.read_file(spider_hex_path)
+        wind_points = gpd.read_file(glaes_wind_path)
+        pv_points = gpd.read_file(glaes_pv_path)
+        hexagons.to_crs(pv_points.crs, inplace=True)
+
+        print(" - Joining turbine locations...")
+        # Spatial join the wind points to the polygons
+        spatial_join = gpd.sjoin(wind_points, hexagons, how='left', predicate='within')
+
+        # Group by polygon and count the points within each polygon
+        wind_point_counts = spatial_join.groupby('index_right0').size()
+
+        # Merge the point counts with the 'hex' GeoDataFrame based on the index
+        hexagons['theo_turbines'] = wind_point_counts
+
+        # If some polygons have no points, fill their 'point_count' with 0
+        hexagons['theo_turbines'] = hexagons['theo_turbines'].fillna(0)
+
+        print(" - Joining pv locations...")
+        # Spatial join the pv points to the polygons
+        spatial_join = gpd.sjoin(pv_points, hexagons, how='left', predicate='within')
+        
+        # Group by polygon and count the points within each polygon
+        pv_point_counts = spatial_join.groupby('index_right0').size()
+
+        # Merge the point counts with the 'hex' GeoDataFrame based on the index
+        hexagons['theo_pv'] = pv_point_counts
+
+        # If some polygons have no points, fill their 'point_count' with 0
+        hexagons['theo_pv'] = hexagons['theo_pv'].fillna(0)
+
+        print(" - Done! Saving to GeoJSON...")
+        # Check if hex GeoDataFrame is empty before saving
+        if not hexagons.empty:
+            # Save the file
+            hexagons.to_file(save_path, driver='GeoJSON', encoding='utf-8')
+            print(" - Save complete!")
+        else:
+            print(" ! Hex GeoDataFrame is empty. This can happen when your country is much smaller than the hexagon size you have used in Spider. Please use smaller hexagons in Spider and retry. Not saving to GeoJSON.")
+
 
 
 #%% file imports
@@ -113,37 +192,59 @@ def get_pv_wind_profiles(hexagons_gdf,
     return pv_profile, wind_profile
 
 
-def load_hexagons(country_parameters):
+def load_hexagons(country_name, country_parameters, how="centroid_within"):
     """
-    Load hexagons following the GeoH2_prep_data. You do not need to run
-    assign_countries.
+    Load hexagons produced by combine_glaes_spider function (or GeoH2_data_prep).
+    You do not need to run assign_countries previously part of GeoH2_data_prep.
 
     Returns
     -------
     None.
 
     """
+    country_name_clean = clean_country_name(country_name)
+    
+    inputpath = os.path.join("Data", f"{country_name_clean}_hex_GeoXin.geojson")
+    outputpath = os.path.join("Data", f"{country_name_clean}_hex_GeoXin_with_country.geojson")
+    
     # Load the Hexagon file in geopandas
-    hexagons = gpd.read_file('Data/hex_final.geojson')
+    hexagons = gpd.read_file(inputpath)
     hexagons.to_crs(epsg=4326, inplace=True)
     # the use of centroid throws a UserWarning when a geographic CRS (e.g. EPSG=4326) is used.
     # ideally you should convert to a projected crs (ideally with equal area cylindrical?) then back again.
     warnings.filterwarnings('ignore', category=UserWarning)
     hexagon_centroids = gpd.GeoDataFrame(geometry=hexagons.centroid, index=hexagons.index, crs=hexagons.crs)
+
+    # =============================================================================
+    # Post geopandas V 0.1.0, the naturalearth_lowres dataset is no longer available.
+    # Natural earth make them available via a github repository: https://github.com/nvkelso/natural-earth-vector/tree/master
+    # =============================================================================
+    # warnings.filterwarnings('ignore', category=FutureWarning)
+    # world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres')) # may need to switch to higher res
+    # countries = world.drop(columns=['pop_est', 'continent', 'iso_a3', 'gdp_md_est'])
     
-    warnings.filterwarnings('ignore', category=FutureWarning)
-    # =============================================================================
-    #     https://stackoverflow.com/questions/76548222/how-to-get-maps-to-geopandas-after-datasets-are-removed
-    # =============================================================================
-    world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres')) # may need to switch to higher res
-    countries = world.drop(columns=['pop_est', 'continent', 'iso_a3', 'gdp_md_est'])
-    countries = countries.rename(columns={'name':'country'})
-    hexagons["country"] = gpd.sjoin(hexagon_centroids, countries, op='intersects').country # changed from "within"
-    hexagons.to_file('Data/hexagons_with_country.geojson', driver='GeoJSON')
+    world = gpd.read_file('/vsicurl/https://github.com/nvkelso/natural-earth-vector/raw/master/10m_cultural/ne_10m_admin_0_countries.shp')
+    countries = world[["NAME", 'geometry']]
+    countries = countries.rename(columns={'NAME':'country'})
+    
+    if how == "centroid_within":
+        # risk that a hexagon is excluded if centroid lies directly on country boundary
+        hexagons["country"] = gpd.sjoin(hexagon_centroids, countries, predicate='within').country
+    elif how == "centroid_intersect":
+        # risk of duplicated hexagons if centroid lies directly on country boundary
+        hexagons["country"] = gpd.sjoin(hexagon_centroids, countries, predicate='intersects').country 
+    elif how == "area_majority":
+        raise NotImplementedError(f"{how} not implemented yet")
+    elif how == "hexagon_within":
+        hexagons["country"] = gpd.sjoin(hexagons, countries, predicate='within').country 
+    else:
+        raise NotImplementedError(f"{how} not implemented yet")
+    
+    hexagons.to_file(outputpath, driver='GeoJSON')
     
     hexagons['country'] = hexagons['country'].apply(lambda x: x if x in country_parameters.index.values else 'Other')
     
-    return hexagons
+    return hexagons, hexagons[hexagons["country"]==country_name_clean]
     
 
 def load_hexagons_temporary(country_parameters, 
@@ -493,7 +594,7 @@ def demand_schedule_constant(quantity, transport_state,
     # quantity_per_delivery = quantity / annual_deliveries
     
     quantity_per_hour = quantity / (365*24)
-    index = pd.date_range(start_date, end_date, freq="H")
+    index = pd.date_range(start_date, end_date, freq="h")
     trucking_hourly_demand_schedule = pd.DataFrame(quantity_per_hour, index=index, columns = ['Demand'])
 
     # # schedule for pipeline
@@ -586,7 +687,7 @@ def optimize_facility(wind_potential, pv_potential, times, demand_profile,
     return lcom, wind_capacity, solar_capacity, battery_capacity, n
 
 
-def optimize_facility2(wind_potential, pv_potential, times, demand_profile,
+def optimize_offgrid_facility(wind_potential, pv_potential, times, demand_profile,
                       demand_state, elec_kWh_per_kg, wind_max_capacity, pv_max_capacity, 
                             country_series):
     '''
@@ -605,104 +706,106 @@ def optimize_facility2(wind_potential, pv_potential, times, demand_profile,
                                    index_col=0)
     storage_params = pd.read_csv("Parameters/Basic_MinX_plant/storage_units.csv",
                                    index_col=0)
-
-    # Set up network
-    # Import a generic network
-    n = pypsa.Network()
-
-    # Set the time values for the network
-    n.set_snapshots(demand_profile.index)
-
-    # Add buses
-    n.add("Bus", "AC_bus")
-    n.add("Bus", "DC_bus")
+    # there is a future warning from pandas within pypsa components re. setting an item of incompatible dtype.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        # Set up network
+        # Import a generic network
+        n = pypsa.Network()
     
-    # Import demand profile
-    # Note: All flows are in MW or MWh, conversions for Concentrate done using 0.717 kWh per kg
+        # Set the time values for the network
+        n.set_snapshots(demand_profile.index)
     
-    # add the load
-    n.add('Load',
-          f'{demand_state} demand',
-          bus = 'AC_bus',
-          p_set = (load * elec_kWh_per_kg) / 1000,
-          )
+        # Add buses
+        n.add("Bus", "AC_bus")
+        n.add("Bus", "DC_bus")
+        
+        # Import demand profile
+        # Note: All flows are in MW or MWh, conversions for Concentrate done using 0.717 kWh per kg
+        
+        # add the load
+        n.add('Load',
+              f'{demand_state} demand',
+              bus = 'AC_bus',
+              p_set = (load * elec_kWh_per_kg) / 1000,
+              )
+        
+        # add generation
+        n.add("Generator",
+                "solar",
+                bus="DC_bus",
+                p_nom_extendable=True,
+                carrier="solar",
+                p_max_pu=solar,
+                p_nom_max=pv_max_capacity)
     
-    # add generation
-    n.add("Generator",
-            "solar",
-            bus="DC_bus",
-            p_nom_extendable=True,
-            carrier="solar",
-            p_max_pu=solar,
-            p_nom_max=pv_max_capacity)
-
-    n.add("Generator",
-            "wind",
-            bus="DC_bus",
-            p_nom_extendable=True,
-            carrier="wind",
-            p_max_pu=wind,
-            p_nom_max=wind_max_capacity)
+        n.add("Generator",
+                "wind",
+                bus="DC_bus",
+                p_nom_extendable=True,
+                carrier="wind",
+                p_max_pu=wind,
+                p_nom_max=wind_max_capacity)
+        
+        # # Send the weather data to the model
+        # n.generators_t.p_max_pu['wind'] = wind_potential
+        # n.generators_t.p_max_pu['solar'] = pv_potential
     
-    # # Send the weather data to the model
-    # n.generators_t.p_max_pu['wind'] = wind_potential
-    # n.generators_t.p_max_pu['solar'] = pv_potential
-
-    # # specify maximum capacity based on land use
-    # n.generators.loc['wind','p_nom_max'] = wind_max_capacity
-    # n.generators.loc['solar','p_nom_max'] = pv_max_capacity
-
-    # Add battery storage
-    n.add("StorageUnit",
-            "battery",
-            bus="DC_bus",
-            p_nom_extendable=True,
-            cyclic_state_of_charge=True,
-            state_of_charge_initial=0.5,
-            max_hours=4)
+        # # specify maximum capacity based on land use
+        # n.generators.loc['wind','p_nom_max'] = wind_max_capacity
+        # n.generators.loc['solar','p_nom_max'] = pv_max_capacity
     
-    # Add converters
-    n.add("Link",
-            "inverter",
-            bus0="DC_bus",
-            bus1="AC_bus",
-            p_nom_extendable=True,
-            efficiency=0.95)
+        # Add battery storage
+        n.add("StorageUnit",
+                "battery",
+                bus="DC_bus",
+                p_nom_extendable=True,
+                cyclic_state_of_charge=True,
+                state_of_charge_initial=0.5,
+                max_hours=4)
+        
+        # Add converters
+        n.add("Link",
+                "inverter",
+                bus0="DC_bus",
+                bus1="AC_bus",
+                p_nom_extendable=True,
+                efficiency=0.95)
+        
+        n.add("Link",
+                "rectifier",
+                bus0="AC_bus",
+                bus1="DC_bus",
+                p_nom_extendable=True,
+                efficiency=0.95)  # Example efficiency
     
-    n.add("Link",
-            "rectifier",
-            bus0="AC_bus",
-            bus1="DC_bus",
-            p_nom_extendable=True,
-            efficiency=0.95)  # Example efficiency
-
-    # Set costs
-    n.generators.loc["solar", "capital_cost"] = (generator_params.loc["Solar", "capital_cost"]
-                                                 * CRF(country_series['Solar interest rate'], country_series['Solar lifetime (years)']))
-    n.generators.loc["wind", "capital_cost"] = (generator_params.loc["Wind", "capital_cost"]
-                                                 * CRF(country_series['Wind interest rate'], country_series['Wind lifetime (years)']))
-    n.storage_units.loc["battery", "capital_cost"] = (storage_params.loc["Battery", "capital_cost"]
-                                                      * CRF(country_series['Solar interest rate'], country_series['Solar lifetime (years)']))
-    n.links.loc["inverter", "capital_cost"] = (50
+        # Set costs
+        n.generators.loc["solar", "capital_cost"] = (generator_params.loc["Solar", "capital_cost"]
+                                                     * CRF(country_series['Solar interest rate'], country_series['Solar lifetime (years)']))
+        n.generators.loc["wind", "capital_cost"] = (generator_params.loc["Wind", "capital_cost"]
+                                                     * CRF(country_series['Wind interest rate'], country_series['Wind lifetime (years)']))
+        n.storage_units.loc["battery", "capital_cost"] = (storage_params.loc["Battery", "capital_cost"]
+                                                          * CRF(country_series['Solar interest rate'], country_series['Solar lifetime (years)']))
+        n.links.loc["inverter", "capital_cost"] = (50
+                                                     * CRF(country_series['Plant interest rate'], country_series['Plant lifetime (years)']))
+        n.links.loc["rectifier", "capital_cost"] = (50
                                                  * CRF(country_series['Plant interest rate'], country_series['Plant lifetime (years)']))
-    n.links.loc["rectifier", "capital_cost"] = (50
-                                                 * CRF(country_series['Plant interest rate'], country_series['Plant lifetime (years)']))
-   
-    # Solve the model
-    solver = 'gurobi'
-    with suppress_output():
-        n.lopf(n.snapshots,
-               solver_name=solver,
-               solver_options = {'OutputFlag': 0},
-               pyomo=False,
-               )
+    
+        # Solve the model
+        solver = 'gurobi'
+        with suppress_output():
+            n.lopf(n.snapshots,
+                   solver_name=solver,
+                   solver_options = {'OutputFlag': 0},
+                   pyomo=False,
+                   )
     
 
 
 
 # Output results
 
-    lcom = n.objective/(n.loads_t.p_set.sum()[0] / elec_kWh_per_kg * 1000) # convert back to kg 
+    lcom = n.objective/(n.loads_t.p_set.sum().iloc[0] / elec_kWh_per_kg * 1000) # convert back to kg 
     wind_capacity = n.generators.p_nom_opt['wind']
     solar_capacity = n.generators.p_nom_opt['solar']
     # electrolyzer_capacity = np.nan # n.links.p_nom_opt['Electrolysis']
@@ -710,21 +813,162 @@ def optimize_facility2(wind_potential, pv_potential, times, demand_profile,
     # h2_storage = np.nan # n.stores.e_nom_opt['Compressed H2 Store']
     # print(lcom)
     
-    if math.isnan(lcom):
-        pass
-        # print("Scot Annual demand (set) {}:".format((demand_profile['Demand'].sum() * elec_kWh_per_kg) / 1000))
-        # print("Scot Annual demand (opt) {}:".format((n.loads_t.p_set.sum()[0].sum())))
-        # print(n.generators_t.p)
-        # print("demand: {}".format(demand_profile['Demand'].sum()),
-        #       "pv lim: {}".format(pv_max_capacity),
-        #       "pv CF: {}".format(pv_potential.mean().item()),
-        #       "wind lim: {}".format(wind_max_capacity),
-        #       "wind CF: {}".format(wind_potential.mean().item()),
-        #       )
-        # print("Annual demand (MWh) {}".format((demand_profile['Demand'].sum() * elec_kWh_per_kg) / 1000))
-        # print("Annual solar (MWh) {}".format(24*365*pv_max_capacity*pv_potential.mean().item()))
-        # print("Annual wind (MWh) {}".format(24*365*wind_max_capacity*wind_potential.mean().item()))
     return lcom, wind_capacity, solar_capacity, battery_capacity, n
+
+
+def optimize_ES_gridconnected(wind_potential, pv_potential, times,
+                              demand_profile, demand_state,
+                              elec_kWh_per_kg, wind_max_capacity,
+                              pv_max_capacity, country_series, battery_p_max=None):
+    '''
+   Optimizes the size of green processing facility components based on renewable potential and country parameters. 
+
+    
+
+    '''
+    
+    solar = pv_potential.to_series().loc[:demand_profile.index[-1]]
+    wind = wind_potential.to_series().loc[:demand_profile.index[-1]]
+    load = demand_profile["Demand"]
+    
+    
+    generator_params = pd.read_csv("Parameters/Basic_MinX_plant/generators.csv",
+                                   index_col=0)
+    storage_params = pd.read_csv("Parameters/Basic_MinX_plant/storage_units.csv",
+                                   index_col=0)
+    # there is a future warning from pandas within pypsa components re. setting an item of incompatible dtype.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        # Set up network
+        # Import a generic network
+        n = pypsa.Network()
+    
+        # Set the time values for the network
+        n.set_snapshots(demand_profile.index)
+    
+        # Add buses
+        n.add("Bus", "AC_bus")
+        n.add("Bus", "DC_bus")
+        
+        # Import demand profile
+        # Note: All flows are in MW or MWh, conversions for Concentrate done using elec_kWh_per_kg parameter
+        
+        # add the load
+        n.add('Load',
+              f'{demand_state} demand',
+              bus = 'AC_bus',
+              p_set = (load * elec_kWh_per_kg) / 1000,
+              )
+        
+        if pv_max_capacity>0:
+            # add generation
+            n.add("Generator",
+                    "solar",
+                    bus="DC_bus",
+                    p_nom_extendable=True,
+                    carrier="solar",
+                    p_max_pu=solar,
+                    p_nom_max=pv_max_capacity,
+                    capital_cost=(generator_params.loc["Solar", "capital_cost"]
+                                  * CRF(country_series['Solar interest rate'],
+                                        country_series['Solar lifetime (years)'])))
+        if wind_max_capacity>0:
+            n.add("Generator",
+                    "wind",
+                    bus="DC_bus",
+                    p_nom_extendable=True,
+                    carrier="wind",
+                    p_max_pu=wind,
+                    p_nom_max=wind_max_capacity,
+                    capital_cost=(generator_params.loc["Wind", "capital_cost"]
+                                  * CRF(country_series['Wind interest rate'],
+                                        country_series['Wind lifetime (years)'])))
+    
+        if isinstance(battery_p_max, type(None)):
+            # Add battery storage
+            n.add("StorageUnit",
+                    "battery",
+                    bus="DC_bus",
+                    p_nom_extendable=True,
+                    cyclic_state_of_charge=True,
+                    state_of_charge_initial=0.5,
+                    max_hours=4,
+                    capital_cost=(storage_params.loc["Battery", "capital_cost"]
+                                  * CRF(country_series['Solar interest rate'],
+                                        country_series['Solar lifetime (years)'])))
+        elif battery_p_max==0:
+            # do not add battery
+            pass
+        else:
+            n.add("StorageUnit",
+                    "battery",
+                    bus="DC_bus",
+                    p_nom_extendable=True,
+                    cyclic_state_of_charge=True,
+                    state_of_charge_initial=0.5,
+                    max_hours=4,
+                    p_nom_max=battery_p_max)
+            
+        n.add("Generator",
+              "grid",
+              bus="AC_bus",
+              p_nom_extendable=True,
+              marginal_cost=country_series["Electricity price (euros/kWh)"] * 1000,
+              capital_cost=(country_series["Grid connection cost (euros/kW)"] * 1000
+                            * CRF(country_series['Plant interest rate'], country_series['Plant lifetime (years)'])))
+        
+        # Add converters
+        n.add("Link",
+                "inverter",
+                bus0="DC_bus",
+                bus1="AC_bus",
+                p_nom_extendable=True,
+                efficiency=0.95,
+                capital_cost=(50
+                              * CRF(country_series['Plant interest rate'],
+                                    country_series['Plant lifetime (years)'])))
+        
+        n.add("Link",
+                "rectifier",
+                bus0="AC_bus",
+                bus1="DC_bus",
+                p_nom_extendable=True,
+                efficiency=0.95,
+                capital_cost=(50
+                              * CRF(country_series['Plant interest rate'],
+                                    country_series['Plant lifetime (years)'])))  # Example efficiency
+    
+        
+        # Solve the model
+        solver = 'gurobi'
+        with suppress_output():
+            n.lopf(n.snapshots,
+                   solver_name=solver,
+                   solver_options = {'OutputFlag': 0},
+                   pyomo=False,
+                   )
+    
+    
+
+
+# Output results
+    lcom = n.objective/(n.loads_t.p_set.sum().iloc[0] / elec_kWh_per_kg * 1000) # convert back to kg 
+    if wind_max_capacity>0:
+        wind_capacity = n.generators.p_nom_opt['wind']
+    else:
+        wind_capacity = np.nan
+    if pv_max_capacity>0:
+        solar_capacity = n.generators.p_nom_opt['solar']
+    else:
+        solar_capacity = np.nan
+    if isinstance(battery_p_max, type(None)) or battery_p_max>0:
+        battery_capacity = n.storage_units.p_nom_opt['battery']
+    else:
+        battery_capacity = np.nan
+    grid_capacity = n.generators.p_nom_opt["grid"]
+    # print(lcom)
+    
+    return lcom, wind_capacity, solar_capacity, battery_capacity, grid_capacity, n
 
 
 def mineral_conversion_stand(final_state, quantity, interest,
@@ -760,4 +1004,4 @@ def mineral_conversion_stand(final_state, quantity, interest,
 
         annual_costs = ((capex_plant * CRF(interest, plant_lifetime))
                         + (capex_plant * opex_plant))
-        return annual_costs
+        return annual_costs / quantity

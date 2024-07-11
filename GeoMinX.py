@@ -6,39 +6,54 @@ Created on Fri Jun 14 14:15:32 2024
 """
 
 import json
-# import atlite
 import geopandas as gpd
-# import pypsa
-# import matplotlib.pyplot as plt
 import pandas as pd
-# import cartopy.crs as ccrs
-# import p_H2_aux as aux
 import GeoMinX_functions as gmx
-# from functions import CRF
 import numpy as np
 import logging
-# import time
-from tqdm.auto import tqdm
+from tqdm import tqdm
 import os
 from shapely.geometry import Point
-# import geopy
 import warnings
 from shapely.errors import ShapelyDeprecationWarning
 # this ignores the following warning when using atlite: 
     # ShapelyDeprecationWarning: STRtree will be changed in 2.0.0 and will not be compatible with versions < 2.
 # be aware, this may lead to a future error if using newer versions of Shapely
 warnings.filterwarnings("ignore", category=ShapelyDeprecationWarning)
-
 logging.basicConfig(level=logging.ERROR)
 
-demand_states = ['CuAnode','CuCathode','CuConcentrate']
+
+
+# =============================================================================
+# Code Configuration Parameters
+#   should these be added to the global_data parameter file?
+# =============================================================================
+country_names = ["Zambia"]  # Multiple countries is not yet implemented, see note below.
+demand_states = ['CuAnode','CuCathode']
+combine_spider_glaes = False
+
+
+# =============================================================================
+# Start of programme
+# =============================================================================
 
 # Create Resources folder to save results if it doesn't already exist
 if not os.path.exists('Resources'):
     os.makedirs('Resources')
 
-if __name__=='__main__':
-    
+# =============================================================================
+# NOTE:
+#    Multiple countries is not yet implemented. The high level country loop
+#    exits here purely as a place holder for future development.
+# =============================================================================
+
+# combine spider and glaes inputs. This replaces the need for GeoH2_data_prep.
+if combine_spider_glaes:
+    gmx.combine_glaes_spider(country_names)
+
+for country_name in country_names:
+    country_name_clean = gmx.clean_country_name(country_name)
+    print(country_name)
     
     # load parameter files
     (infra_data, global_data, mineral_data, demand_center_list,
@@ -48,20 +63,15 @@ if __name__=='__main__':
     road_construction = global_data['Road construction allowed']
     rail_construction = global_data['Rail construction allowed']
     
-    #%% load spider data
-    pass
-
-    #%% load glaes data
-    pass
+    #%% Import hexagon inputs
     
-    #%% merge data - previously GeoH2_data_prep
-    # temporary just import the data as output from GeoH2_data_prep
-    hexagons_gdf = gmx.load_hexagons(country_parameters)
+    _, hexagons_gdf = gmx.load_hexagons(country_name_clean, country_parameters) # import only those associated with the country defined above
     num_hex = hexagons_gdf.shape[0]
     
+    #%% convert demand and feedstock locations to geodataframes
     demand_points_gdf = gpd.GeoDataFrame(demand_center_list, geometry=[Point(xy) for xy in zip(demand_center_list['Lon [deg]'], demand_center_list['Lat [deg]'])]).set_crs(epsg=4326)
     num_dem = demand_points_gdf.shape[0]
-
+    
     feedstock_points_gdf = gpd.GeoDataFrame(generation_center_list, geometry=[Point(xy) for xy in zip(generation_center_list['Lon [deg]'], generation_center_list['Lat [deg]'])]).set_crs(epsg=4326)
     num_gen = feedstock_points_gdf.shape[0]
     
@@ -69,12 +79,6 @@ if __name__=='__main__':
     pv_profile, wind_profile = gmx.get_pv_wind_profiles(hexagons_gdf)
     
     #%% calculate distances
-# =============================================================================
-#     Would it be a good idea to calculate the transport costs for every 
-#     combination of mines, hexagons, and demands first - or will this be too
-#     high a memory load? Opportunity to skip calculations where not needed.
-# =============================================================================
-    
     hexagon_to_demand_distance_matrix = gmx.geodesic_matrix(hexagons_gdf,
                                                      demand_points_gdf,
                                                      desc="Calculating distance to demand")
@@ -99,7 +103,7 @@ if __name__=='__main__':
     #                                                  index=hexagons_gdf.index,
     #                                                  columns=feedstock_points_gdf.index)
         
-   
+       
     #%% meeting demand
     # =============================================================================
     # iterate through the list of demands. For each demand, calculate the
@@ -112,7 +116,7 @@ if __name__=='__main__':
     for d, dix in enumerate(demand_points_gdf.index):
         if dix!="Livingstone":
             continue
-
+    
         # demand_location = Point(demand_center_list.loc[d,'Lat [deg]'],
         #                         demand_center_list.loc[d,'Lon [deg]'])
         demand = demand_points_gdf.loc[dix,:]
@@ -246,7 +250,7 @@ if __name__=='__main__':
             facility_annual_cost = gmx.mineral_conversion_stand(demand_state,
                                                                 product_quantity,
                                                                 country_parameters.loc[hexagons_gdf.loc[hix, 'country'],'Plant interest rate'])
-            
+            facility_annual_cost_per_kg = facility_annual_cost / product_quantity
             
             # =============================================================================
             # energy optimisation of facility
@@ -256,10 +260,25 @@ if __name__=='__main__':
             
             
             # grid power
-            grid_energy_cost = (conversion_parameters.loc["Electricity demand (kWh per kg product)", demand_state]
-                                * demand_trucking_schedule
-                                * country_parameters.loc[hexagons_gdf.loc[hix, "country"], "Electricity price (euros/kWh)"]).sum()[0]
-            grid_energy_cost_per_kg = grid_energy_cost / product_quantity
+            # grid_energy_cost = (conversion_parameters.loc["Electricity demand (kWh per kg product)", demand_state]
+            #                     * demand_trucking_schedule
+            #                     * country_parameters.loc[hexagons_gdf.loc[hix, "country"], "Electricity price (euros/kWh)"]).sum()[0]
+            # grid_energy_cost_per_kg = grid_energy_cost / product_quantity
+            # print(grid_energy_cost_per_kg)
+            
+            (grid_energy_cost_per_kg, _, _, _,
+             grid_capacity,
+             network) = gmx.optimize_ES_gridconnected(wind_profile.sel(hexagon = hix),
+                                    pv_profile.sel(hexagon = hix),
+                                    wind_profile.time,
+                                    demand_trucking_schedule,
+                                    demand_state,
+                                    conversion_parameters.loc["Electricity demand (kWh per kg product)", demand_state],
+                                    0,
+                                    0,
+                                    country_parameters.loc[hexagons_gdf.loc[hix, "country"]],
+                                    battery_p_max=0)
+            
             
             # =============================================================================
             # energy optimisation of facility
@@ -276,7 +295,7 @@ if __name__=='__main__':
                  wind_capacity,
                  solar_capacity,
                  battery_capacity,
-                 network) = gmx.optimize_facility2(wind_profile.sel(hexagon = hix),
+                 network) = gmx.optimize_offgrid_facility(wind_profile.sel(hexagon = hix),
                                         pv_profile.sel(hexagon = hix),
                                         wind_profile.time,
                                         demand_trucking_schedule,
@@ -310,10 +329,10 @@ if __name__=='__main__':
             # =============================================================================
             
             # facility costs
-            annual_facility_costs[h] = facility_annual_cost
+            annual_facility_costs[h] = facility_annual_cost_per_kg
            
             # road costs
-            road_construction_costs[h] = demand_road_construction + feedstock_road_construction
+            road_construction_costs[h] = (demand_road_construction + feedstock_road_construction) / product_quantity
             demand_trucking_costs[h] = demand_trucking_cost_per_kg
             feedstock_trucking_costs[h] = feedstocks_trucking_cost_per_kg_product
             total_trucking_costs[h] = demand_trucking_cost_per_kg + feedstocks_trucking_cost_per_kg_product
@@ -336,12 +355,12 @@ if __name__=='__main__':
                 total_offgrid_lcoms[h] = np.nan
             else:
                 total_offgrid_lcoms[h] = (lcom
-                                  + facility_annual_cost
+                                  + facility_annual_cost_per_kg
                                   + road_construction_costs[h] 
                                   + total_trucking_costs[h])
             
             total_grid_lcoms[h] = (grid_energy_cost_per_kg
-                              + facility_annual_cost
+                              + facility_annual_cost_per_kg
                               + road_construction_costs[h] 
                               + total_trucking_costs[h])
             # calculate cost of mine operation (ore to concentrate)
@@ -350,9 +369,9 @@ if __name__=='__main__':
         # update demand outputs
         # =============================================================================
         # facility costs
-        hexagons_gdf[f'{dix} annual facility costs (euros/a/kg)'] = annual_facility_costs / product_quantity
+        hexagons_gdf[f'{dix} annual facility costs (euros/a/kg)'] = facility_annual_cost_per_kg 
         # road costs
-        hexagons_gdf[f'{dix} road construction costs (euros/a/kg)'] = road_construction_costs / product_quantity
+        hexagons_gdf[f'{dix} road construction costs (euros/a/kg)'] = road_construction_costs
         hexagons_gdf[f'{dix} trucking transport costs (euros/a/kg)'] = total_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
         hexagons_gdf[f'{dix} feedstock trucking transport costs (euros/a/kg)'] = feedstock_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
         hexagons_gdf[f'{dix} product trucking transport costs (euros/a/kg)'] = demand_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
@@ -372,4 +391,5 @@ if __name__=='__main__':
         
         # hexagons_gdf[f'{dix} trucking state'] = trucking_states # cost of road construction, supply conversion, trucking transport, and demand conversion
         # hexagons_gdf[f'{dix} pipeline transport and conversion costs'] = pipeline_costs # cost of supply conversion, pipeline transport, and demand conversion
-    hexagons_gdf.to_file('Resources/hex_final.geojson', driver='GeoJSON', encoding='utf-8')
+    output_path = os.path.join("Data", "Resources", f"{country_name_clean}_hex_GeoX_final.geojson")
+    hexagons_gdf.to_file(output_path, driver='GeoJSON', encoding='utf-8')
