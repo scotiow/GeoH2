@@ -403,7 +403,7 @@ for country_name in country_names:
             total_train_costs[h] =  demand_train_cost_per_kg + feedstocks_train_cost_per_kg_product + rail_construction_costs[h]
             
             min_transport_costs[h] = min([total_trucking_costs[h], total_train_costs[h]])
-            min_transport_method[h] = ["Road", "Rail"].index(min_transport_costs[h])
+            min_transport_method[h] = ["Road", "Rail"][[total_trucking_costs[h], total_train_costs[h]].index(min_transport_costs[h])]
 
             # off-grid costs
             pv_capacities[h] = solar_capacity
