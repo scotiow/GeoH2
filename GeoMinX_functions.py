@@ -26,7 +26,8 @@ from unidecode import unidecode
 
 logging.basicConfig(level=logging.ERROR)
 
-# Define a context manager to suppress print statements and stderr
+#%% micellaneous functions
+# Define a context manager to suppress print statements and stderr for pypsa
 @contextlib.contextmanager
 def suppress_output():
     with open(os.devnull, 'w') as devnull:
@@ -39,6 +40,7 @@ def suppress_output():
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+
 
 def clean_country_name(country_name):
     # Get country names without accents, spaces, apostrophes, or periods for loading files
@@ -116,7 +118,22 @@ def combine_glaes_spider(country_names, spider_hex_path=None,
         else:
             print(" ! Hex GeoDataFrame is empty. This can happen when your country is much smaller than the hexagon size you have used in Spider. Please use smaller hexagons in Spider and retry. Not saving to GeoJSON.")
 
-
+def determine_feedstock_sources(feedstock_points_gdf, hexagon_to_feedstock_distance_matrix, hix, feedstock_quantity):
+    feedstock_ranked = feedstock_points_gdf.merge(hexagon_to_feedstock_distance_matrix.loc[hix,:], left_index=True, right_index=True).sort_values(by=hix)[["Annual capacity [kg/a]"]]
+    feedstock_ranked["Cumulative [kg/a]"] = feedstock_ranked.cumsum()
+    feedstock_ranked["Feedstock used [kg/a]"] = 0
+    remaining_quantity = feedstock_quantity
+    for f, feedstock in feedstock_ranked.iterrows():
+        if remaining_quantity <= 0:
+            break
+        feedstock_used = min(feedstock_points_gdf.loc[f,"Annual capacity [kg/a]"], remaining_quantity)
+        feedstock_ranked.loc[f,"Feedstock used [kg/a]"] = feedstock_used
+        remaining_quantity -= feedstock_used
+        
+    
+    feedstock = feedstock_ranked.loc[:feedstock_ranked[feedstock_ranked["Cumulative [kg/a]"] >= feedstock_quantity].index[0], :]
+    feedstock_ranked_idxs = feedstock.index
+    return feedstock, feedstock_ranked_idxs
 
 #%% file imports
 
@@ -269,6 +286,7 @@ def load_hexagons_temporary(country_parameters,
     hexagon = gpd.read_file('Data/hexagons_with_country.geojson')
     return hexagon
 
+#%% distance functions
 def geodesic_matrix(gdf1, gdf2, desc="calculating distances"):
     distances = np.empty((gdf1.shape[0], gdf2.shape[0]))
     warnings.filterwarnings('ignore', category=UserWarning)
@@ -287,6 +305,7 @@ def find_nearest_hex(idx, hex_to_X_distance):
     hix = hex_to_X_distance.loc[:, idx].sort_values().index[0] # index of the nearest hexagon to the demand centre (contain might not work at low hexagon resolution)
     return hix
 
+#%% economic functions
 def CRF(interest,lifetime):
     '''
     Calculates the capital recovery factor of a capital investment.
@@ -310,10 +329,11 @@ def CRF(interest,lifetime):
     CRF = (((1+interest)**lifetime)*interest)/(((1+interest)**lifetime)-1)
     return CRF
 
+#%% road and trucking 
 def calculate_road_construction(hexagon, infra_data, country_parameters):
-    road_capex_long = infra_data.at['Long road','CAPEX']            #â¬/km from John Hine, converted to Euro (Assumed earth to paved road)
-    road_capex_short = infra_data.at['Short road','CAPEX']         #â¬/km for raods < 10 km, from John Hine, converted to Euro (Assumed earth to paved road)
-    road_opex = infra_data.at['Short road','OPEX']                 #â¬/km/year from John Hine, converted to Euro (Assumed earth to paved road)
+    road_capex_long = infra_data.at['Long road','CAPEX (euros/km)']            #â¬/km from John Hine, converted to Euro (Assumed earth to paved road)
+    road_capex_short = infra_data.at['Short road','CAPEX (euros/km)']         #â¬/km for raods < 10 km, from John Hine, converted to Euro (Assumed earth to paved road)
+    road_opex = infra_data.at['Short road','OPEX (euros/km/year)']                 #â¬/km/year from John Hine, converted to Euro (Assumed earth to paved road)
 
     if hexagon['road_dist']==0:
         road_construction_costs = 0.
@@ -330,7 +350,6 @@ def calculate_road_construction(hexagon, infra_data, country_parameters):
                                          country_parameters.loc[hexagon['country'],'Infrastructure lifetime (years)'])
                                    + hexagon['road_dist'] * road_opex)
     return road_construction_costs
-
 
 def mineral_trucking_costs(transport_state, distance, quantity, interest, excel_path= "Parameters/transport_parameters.xlsx"):
     '''
@@ -411,22 +430,135 @@ def mineral_trucking_costs(transport_state, distance, quantity, interest, excel_
     costs_per_unit = annual_costs / quantity
     return costs_per_unit, transport_state
 
-def determine_feedstock_sources(feedstock_points_gdf, hexagon_to_feedstock_distance_matrix, hix, feedstock_quantity):
-    feedstock_ranked = feedstock_points_gdf.merge(hexagon_to_feedstock_distance_matrix.loc[hix,:], left_index=True, right_index=True).sort_values(by=hix)[["Annual capacity [kg/a]"]]
-    feedstock_ranked["Cumulative [kg/a]"] = feedstock_ranked.cumsum()
-    feedstock_ranked["Feedstock used [kg/a]"] = 0
-    remaining_quantity = feedstock_quantity
-    for f, feedstock in feedstock_ranked.iterrows():
-        if remaining_quantity <= 0:
-            break
-        feedstock_used = min(feedstock_points_gdf.loc[f,"Annual capacity [kg/a]"], remaining_quantity)
-        feedstock_ranked.loc[f,"Feedstock used [kg/a]"] = feedstock_used
-        remaining_quantity -= feedstock_used
-        
+#%% rail and train
+def calculate_rail_construction(hexagon, infra_data, country_parameters):
+    rail_capex_long = infra_data.at['Long rail', 'CAPEX (euros/km)']  # euros / km, assuming earth to rail
+    rail_capex_short = infra_data.at['Short rail','CAPEX (euros/km)']  # euros / km, assuming earth to rail
+    rail_opex = infra_data.at['Short rail','OPEX (euros/km/year)']  # euros/km/year
     
-    feedstock = feedstock_ranked.loc[:feedstock_ranked[feedstock_ranked["Cumulative [kg/a]"] >= feedstock_quantity].index[0], :]
-    feedstock_ranked_idxs = feedstock.index
-    return feedstock, feedstock_ranked_idxs
+    if hexagon['rail_dist']==0:
+        rail_construction_costs = 0.
+    elif hexagon['rail_dist']!=0 and hexagon['rail_dist']<10:
+        rail_construction_costs = (hexagon['rail_dist']
+                                   * rail_capex_short
+                                   * CRF(country_parameters.loc[hexagon['country'],'Infrastructure interest rate'],
+                                         country_parameters.loc[hexagon['country'],'Infrastructure lifetime (years)'])
+                                   + hexagon['rail_dist'] * rail_opex)
+    else:
+        rail_construction_costs = (hexagon['rail_dist'] 
+                                   * rail_capex_long 
+                                   * CRF(country_parameters.loc[hexagon['country'], 'Infrastructure interest rate'],
+                                         country_parameters.loc[hexagon['country'],'Infrastructure lifetime (years)'])
+                                   + hexagon['rail_dist'] * rail_opex)
+    return rail_construction_costs
+    
+def mineral_train_costs(transport_state, distance, quantity, interest, excel_path= "Parameters/rail_parameters.xlsx"):
+    '''
+    Estimates the annual cost of transporting resource by train.
+    Method:
+        1. 
+        2.
+    Assumptions:
+        1.
+        2.
+
+    Parameters
+    ----------
+    transport_state : string
+        state resource is transported in.
+    distance : float
+        distance between production site and demand site.
+    quantity : float
+        annual amount of resource to transport.
+    interest : float
+        interest rate on capital investments.
+    excel_path : string
+        path to transport_parameters.xlsx file
+        
+    Returns
+    -------
+    annual_costs : float
+        annual cost of hydrogen transport with specified method.
+    '''
+    daily_quantity = quantity / 365
+
+    transport_parameters = pd.read_excel(excel_path,
+                                         sheet_name = transport_state,
+                                         index_col = 'Parameter'
+                                         ).squeeze('columns')
+
+    average_train_speed = transport_parameters['Average train speed (km/h)']
+    working_hours = transport_parameters['Working hours (h/day)']
+    diesel_price = transport_parameters['Diesel price (euros/L)']
+    costs_for_driver = transport_parameters['Costs for driver (euros/h)']
+    working_days = transport_parameters['Working days (per year)']
+    max_driving_dist = transport_parameters['Max distance (km/a)']
+
+    spec_capex_loco = transport_parameters['Spec capex loco (euros)']
+    spec_opex_loco = transport_parameters['Spec opex loco (% of capex/a)']
+    diesel_consumption = transport_parameters['Diesel consumption (L/100 km)']
+    loco_lifetime = transport_parameters['Loco lifetime (a)']
+
+    spec_capex_wagon = transport_parameters['Spec capex wagon (euros)']
+    spec_opex_wagon =transport_parameters['Spec opex wagon (% of capex/a)']
+    net_capacity = transport_parameters['Net capacity (kg)']
+    wagon_lifetime = transport_parameters['Wagon lifetime (a)']
+    loading_unloading_time = transport_parameters['Loading unloading time (h)']
+    max_wagons = transport_parameters['Max wagons per loco']
+
+    # max_day_dist = max_driving_dist/working_days
+    
+    # calc minimum journeys based on  max # of wagons
+    # wagon_journeys_needed = np.ceil(quantity/(net_capacity * max_wagons))
+    
+    max_journeys_per_loco = (working_hours * working_days) / (loading_unloading_time + (2 * distance / average_train_speed))  # max journeys a single loco can make per year
+    max_quantity_per_train = max_journeys_per_loco * net_capacity * max_wagons  # max quantity a single train (loco + max wagons) can transfer per year
+    min_locos = np.ceil(quantity/max_quantity_per_train)  # minimum number of locos required assuming 1 loco per train
+    min_wagons_per_train = np.ceil((quantity/min_locos)/(net_capacity))  # minimum wagons needed per train
+    
+    total_train_journeys = quantity / (min_wagons_per_train * net_capacity)
+    
+    # # calc min number of wagons per train based on min journeys
+    # wagons_per_train = np.ceil(quantity/net_capacity)/min_journeys_needed
+    
+    # deliveries_per_train = working_hours / (loading_unloading_time + (2 * distance / average_train_speed)) # per day
+    
+    # trailors_needed = round((amount_deliveries_needed / deliveries_per_truck) + 0.5, 0)
+    # total_drives_day = round(amount_deliveries_needed + 0.5, 0) # not in ammonia calculation
+    # if transport_state == 'NH3': #!!! double checking if this is needed with Leander
+    #     trucks_needed = trailors_needed
+    # else:
+    #     trucks_needed = max(round((total_drives_day * 2 * distance * working_days / max_driving_dist) + 0.5, 0), trailors_needed)
+
+    capex_loco = min_locos * spec_capex_loco
+    capex_wagon = min_wagons_per_train * spec_capex_wagon
+    # capex_total = capex_trailor + capex_trucks
+    # this if statement seems suspect to me-- how can a fractional number of deliveries be completed?
+    
+    fuel_costs = ((total_train_journeys * 2 * distance) / 100) * diesel_consumption * diesel_price
+    wages = total_train_journeys * ((distance / average_train_speed) * 2 + loading_unloading_time) * costs_for_driver
+    
+    # if amount_deliveries_needed < 1:
+    #     fuel_costs = (amount_deliveries_needed * 2 * distance * 365 / 100) * diesel_consumption * diesel_price
+    #     wages = amount_deliveries_needed * ((distance / average_truck_speed) * 2 + loading_unloading_time) * working_days * costs_for_driver
+    
+    # else:
+    #     fuel_costs = (round(amount_deliveries_needed + 0.5) * 2 * distance * 365 / 100) * diesel_consumption * diesel_price
+    #     wages = round(amount_deliveries_needed + 0.5) * ((distance / average_truck_speed) * 2 + loading_unloading_time) * working_days * costs_for_driver
+
+    annual_costs = ((capex_loco * CRF(interest, loco_lifetime) + capex_wagon * CRF(interest, wagon_lifetime))
+                    + capex_loco * spec_opex_loco 
+                    + capex_wagon * spec_opex_wagon 
+                    + fuel_costs 
+                    + wages)
+    
+    costs_per_unit = annual_costs / quantity
+    return costs_per_unit, transport_state
+
+
+
+
+
 
 # def cheapest_mineral_trucking_strategy(final_state, quantity, distance, 
 #                                 elec_costs, diesel_costs, heat_costs,
@@ -519,6 +651,7 @@ def determine_feedstock_sources(feedstock_points_gdf, hexagon_to_feedstock_dista
 #     else:
 #         raise NotImplementedError(f'Conversion costs for {final_state} not currently supported.')
 
+#%% demand schedules
 def demand_schedule(quantity, transport_state,
                     transport_excel_path="Parameters/transport_parameters.xlsx",
                     weather_excel_path="Parameters/weather_parameters.xlsx"):
@@ -604,6 +737,23 @@ def demand_schedule_constant(quantity, transport_state,
 
     return trucking_hourly_demand_schedule
 
+#%% grid connection and construction
+def calculate_grid_construction(hexagon, infra_data, country_parameters):
+    grid_capex = infra_data.at['Grid','CAPEX (euros/km)']
+    grid_opex = infra_data.at['Grid','OPEX (euros/km/year)']                
+
+    if hexagon['grid_dist']==0:
+        grid_construction_costs = 0.
+    else:
+        grid_construction_costs = (hexagon['grid_dist'] 
+                                   * grid_capex 
+                                   * CRF(country_parameters.loc[hexagon['country'], 'Infrastructure interest rate'],
+                                         country_parameters.loc[hexagon['country'],'Infrastructure lifetime (years)'])
+                                   + hexagon['grid_dist'] * grid_opex)
+    return grid_construction_costs
+    
+
+#%% energy system optimisation
 def optimize_facility(wind_potential, pv_potential, times, demand_profile,
                       demand_state, elec_kWh_per_kg, wind_max_capacity, pv_max_capacity, 
                             country_series):
@@ -746,14 +896,6 @@ def optimize_offgrid_facility(wind_potential, pv_potential, times, demand_profil
                 carrier="wind",
                 p_max_pu=wind,
                 p_nom_max=wind_max_capacity)
-        
-        # # Send the weather data to the model
-        # n.generators_t.p_max_pu['wind'] = wind_potential
-        # n.generators_t.p_max_pu['solar'] = pv_potential
-    
-        # # specify maximum capacity based on land use
-        # n.generators.loc['wind','p_nom_max'] = wind_max_capacity
-        # n.generators.loc['solar','p_nom_max'] = pv_max_capacity
     
         # Add battery storage
         n.add("StorageUnit",
@@ -799,18 +941,12 @@ def optimize_offgrid_facility(wind_potential, pv_potential, times, demand_profil
                    solver_options = {'OutputFlag': 0},
                    pyomo=False,
                    )
-    
 
-
-
-# Output results
-
+    # Output results
     lcom = n.objective/(n.loads_t.p_set.sum().iloc[0] / elec_kWh_per_kg * 1000) # convert back to kg 
     wind_capacity = n.generators.p_nom_opt['wind']
     solar_capacity = n.generators.p_nom_opt['solar']
-    # electrolyzer_capacity = np.nan # n.links.p_nom_opt['Electrolysis']
     battery_capacity = n.storage_units.p_nom_opt['battery']
-    # h2_storage = np.nan # n.stores.e_nom_opt['Compressed H2 Store']
     # print(lcom)
     
     return lcom, wind_capacity, solar_capacity, battery_capacity, n
@@ -970,7 +1106,7 @@ def optimize_ES_gridconnected(wind_potential, pv_potential, times,
     
     return lcom, wind_capacity, solar_capacity, battery_capacity, grid_capacity, n
 
-
+#%% facility construction
 def mineral_conversion_stand(final_state, quantity, interest,
                              conversion_excel_path="Parameters/conversion_parameters.xlsx"):
     '''

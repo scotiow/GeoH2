@@ -5,6 +5,7 @@ Created on Fri Jun 14 14:15:32 2024
 @author: Scot Wheeler
 """
 
+
 import json
 import geopandas as gpd
 import pandas as pd
@@ -21,7 +22,6 @@ from shapely.errors import ShapelyDeprecationWarning
 # be aware, this may lead to a future error if using newer versions of Shapely
 warnings.filterwarnings("ignore", category=ShapelyDeprecationWarning)
 logging.basicConfig(level=logging.ERROR)
-
 
 
 # =============================================================================
@@ -62,6 +62,7 @@ for country_name in country_names:
     
     road_construction = global_data['Road construction allowed']
     rail_construction = global_data['Rail construction allowed']
+    grid_construction = global_data['Grid construction allowed']
     
     #%% Import hexagon inputs
     
@@ -91,19 +92,26 @@ for country_name in country_names:
     
     #%% calculate road construction costs
     if road_construction:
-        hexagons_road_construction = hexagons_gdf.apply(gmx.calculate_road_construction,
+        tqdm.pandas(desc="Calculating Road Construction")  # to use with pandas.apply
+        hexagons_road_construction = hexagons_gdf.progress_apply(gmx.calculate_road_construction,
+                                                                       args=[infra_data, country_parameters],
+                                                                       axis=1)
+        
+    #%% calculate rail construction costs
+    if rail_construction:
+        tqdm.pandas(desc="Calculating Rail Construction")  # to use with pandas.apply
+        hexagons_rail_construction = hexagons_gdf.progress_apply(gmx.calculate_rail_construction,
                                                                        args=[infra_data, country_parameters],
                                                                        axis=1)
     
-    # may use to keep track of separate costs
-    # road_construction_costs_to_demand = pd.DataFrame(np.empty((num_hex, num_dem)),
-    #                                                  index=hexagons_gdf.index,
-    #                                                  columns=demand_points_gdf.index)
-    # road_construction_costs_to_generation = pd.DataFrame(np.empty((num_hex, num_gen)),
-    #                                                  index=hexagons_gdf.index,
-    #                                                  columns=feedstock_points_gdf.index)
-        
-       
+    #%% calculate grid contruction costs
+    if grid_construction:
+        tqdm.pandas(desc="Calculating Grid Construction")  # to use with pandas.apply
+        hexagons_grid_construction = hexagons_gdf.progress_apply(gmx.calculate_grid_construction,
+                                                                       args=[infra_data, country_parameters],
+                                                                       axis=1)
+
+
     #%% meeting demand
     # =============================================================================
     # iterate through the list of demands. For each demand, calculate the
@@ -116,27 +124,30 @@ for country_name in country_names:
     for d, dix in enumerate(demand_points_gdf.index):
         if dix!="Livingstone":
             continue
-    
-        # demand_location = Point(demand_center_list.loc[d,'Lat [deg]'],
-        #                         demand_center_list.loc[d,'Lon [deg]'])
+
         demand = demand_points_gdf.loc[dix,:]
         demand_state = demand["Demand state"]
         demand_hix = demand_points_gdf["nearest hexidx"][dix]
+        
         if demand_state not in demand_states:
             raise NotImplementedError(f'{demand_state} demand not supported.')
-        hex_to_demand_dist = hexagon_to_demand_distance_matrix.loc[:,dix] # could access these directly to save memory
-        # hex_to_gen_dist = hexagon_to_feedstock_distance_matrix.loc[:,demand.name] # could access these directly to save memory
+        
+        
         product_quantity = demand['Annual demand [kg/a]']
         feedstock_quantity = demand['Annual demand [kg/a]'] / conversion_parameters.loc["Efficiency (kg product / kg feedstock)", demand_state]
+        
         if feedstock_quantity > feedstock_points_gdf["Annual capacity [kg/a]"].sum():
             raise NotImplementedError(f'Not enough feedstock demand to meet {dix} {demand_state}')
-          
+        
+        # =============================================================================
+        #   Create output vectors      
+        # =============================================================================
         # facility costs
         annual_facility_costs = np.empty(num_hex)
         
         # road costs
         road_construction_costs = np.empty(num_hex)  # total (product + feedstock) cost
-        trucking_state_to_demand = np.empty(num_hex, dtype='<U20')  
+        # trucking_state_to_demand = np.empty(num_hex, dtype='<U20')  
         total_trucking_costs =  np.empty(num_hex)  # total (product + feedstock) trucking cost per kg product
         demand_trucking_costs =  np.empty(num_hex)
         feedstock_trucking_costs =  np.empty(num_hex)
@@ -144,8 +155,14 @@ for country_name in country_names:
         
         # rail costs
         rail_construction_costs = np.empty(num_hex)
-        train_state_to_demand = np.empty(num_hex, dtype='<U20')
+        # train_state_to_demand = np.empty(num_hex, dtype='<U20')
         total_train_costs =  np.empty(num_hex)
+        demand_train_costs =  np.empty(num_hex)
+        feedstock_train_costs =  np.empty(num_hex)
+        
+        # minimum transport costs
+        min_transport_costs = np.empty(num_hex)
+        min_transport_method = np.empty(num_hex, dtype='<U20')
         
         # off-grid costs
         pv_capacities = np.empty(num_hex)
@@ -154,6 +171,7 @@ for country_name in country_names:
         offgrid_lcoms = np.empty(num_hex)
         
         # grid costs
+        grid_construction_costs = np.empty(num_hex)
         grid_lcoms = np.empty(num_hex)
         
         # total costs
@@ -228,9 +246,23 @@ for country_name in country_names:
             # =============================================================================
             # cost of rail transport from facility to demand
             # =============================================================================
+            # cost of road construction (total)
+            demand_rail_construction = 0
+            if rail_construction:
+                if hix==demand_hix: # demand is in same hexagon
+                    # only need to account for 1 road construction
+                    demand_rail_construction = hexagons_rail_construction[hix]
+                else:
+                    # build road for hexagon and demand hexagon
+                    demand_rail_construction = (hexagons_rail_construction[hix] + 
+                                                hexagons_rail_construction[demand_hix])
             
-            # cost of rail construction
-            demand_rail_construction_cost = 0
+            # calculate road transport to demand
+            demand_train_cost_per_kg, demand_train_state = gmx.mineral_train_costs(demand_state,
+                                                                                     hexagon_to_demand_distance_matrix.loc[hix, dix],
+                                                                                     product_quantity,
+                                                                                     country_parameters.loc[hexagons_gdf.loc[hix, 'country'], 'Infrastructure interest rate'],
+                                                                                     )
             
             # =============================================================================
             # cost of rail transport from feedstock to facility
@@ -238,9 +270,34 @@ for country_name in country_names:
             
             # feedstock rail construction
             feedstock_rail_construction = 0
+            if rail_construction:
+                for f in feedstock_sources.index:
+                    feedstock_hix = feedstock_points_gdf["nearest hexidx"][f]
+                    if hix==feedstock_hix: # feedstock is in same hexagon
+                        # road construction already accounted for in demand
+                        pass
+                    else:
+                        # build road for feedstock hexagon
+                        feedstock_rail_construction += hexagons_rail_construction[feedstock_hix]
+                    
+            # calculate rail transport from feedstock
+            feedstocks_train_cost = 0
+            for f in feedstock_sources.index:
+                source_quantity = feedstock_sources.loc[f, "Feedstock used [kg/a]"]
+                feedstock_train_cost_per_kg, demand_train_state = gmx.mineral_train_costs("CuConcentrate",
+                                                                                         hexagon_to_feedstock_distance_matrix.loc[hix, f],
+                                                                                         source_quantity,
+                                                                                         country_parameters.loc[hexagons_gdf.loc[hix, 'country'], 'Infrastructure interest rate'],
+                                                                                         )
+                feedstocks_train_cost += feedstock_train_cost_per_kg * source_quantity
+            feedstocks_train_cost_per_kg_product = feedstocks_train_cost / product_quantity
             
             
-            # trucking schedule
+            # =============================================================================
+            # Transport schedule
+            # =============================================================================
+            # a constant transport demand is used assuming that product is easy
+            # to stockpile therefore disconnecting product production and transport
             demand_trucking_schedule = gmx.demand_schedule_constant(product_quantity, demand_state)
             
             # =============================================================================
@@ -256,7 +313,9 @@ for country_name in country_names:
             # energy optimisation of facility
             # =============================================================================
             
-            # grid construction?
+            hex_grid_construction = 0
+            if grid_construction:
+                hex_grid_construction = hexagons_grid_construction[hix]
             
             
             # grid power
@@ -335,12 +394,17 @@ for country_name in country_names:
             road_construction_costs[h] = (demand_road_construction + feedstock_road_construction) / product_quantity
             demand_trucking_costs[h] = demand_trucking_cost_per_kg
             feedstock_trucking_costs[h] = feedstocks_trucking_cost_per_kg_product
-            total_trucking_costs[h] = demand_trucking_cost_per_kg + feedstocks_trucking_cost_per_kg_product
+            total_trucking_costs[h] = demand_trucking_cost_per_kg + feedstocks_trucking_cost_per_kg_product + road_construction_costs[h]
             
             # rail costs
-            rail_construction_costs[h] = 0
-            total_train_costs[h] =  0
+            rail_construction_costs[h] = (demand_rail_construction + feedstock_rail_construction) / product_quantity
+            demand_train_costs[h] =  demand_train_cost_per_kg
+            feedstock_train_costs[h] =  feedstocks_train_cost_per_kg_product
+            total_train_costs[h] =  demand_train_cost_per_kg + feedstocks_train_cost_per_kg_product + rail_construction_costs[h]
             
+            min_transport_costs[h] = min([total_trucking_costs[h], total_train_costs[h]])
+            min_transport_method[h] = ["Road", "Rail"].index(min_transport_costs[h])
+
             # off-grid costs
             pv_capacities[h] = solar_capacity
             wind_capacities[h] = wind_capacity
@@ -348,7 +412,9 @@ for country_name in country_names:
             offgrid_lcoms[h] = lcom
             
             # grid costs
+            grid_construction_costs[h] = hex_grid_construction / product_quantity
             grid_lcoms[h] = grid_energy_cost_per_kg
+            
             
             # total costs
             if lcom==np.nan:
@@ -356,40 +422,51 @@ for country_name in country_names:
             else:
                 total_offgrid_lcoms[h] = (lcom
                                   + facility_annual_cost_per_kg
-                                  + road_construction_costs[h] 
                                   + total_trucking_costs[h])
             
             total_grid_lcoms[h] = (grid_energy_cost_per_kg
                               + facility_annual_cost_per_kg
-                              + road_construction_costs[h] 
                               + total_trucking_costs[h])
-            # calculate cost of mine operation (ore to concentrate)
+            
+            # exit hexagon loop
         
         # =============================================================================
         # update demand outputs
         # =============================================================================
         # facility costs
-        hexagons_gdf[f'{dix} annual facility costs (euros/a/kg)'] = facility_annual_cost_per_kg 
+        hexagons_gdf[f'{dix} annual facility costs (euros/kg/year)'] = facility_annual_cost_per_kg 
+        
         # road costs
-        hexagons_gdf[f'{dix} road construction costs (euros/a/kg)'] = road_construction_costs
-        hexagons_gdf[f'{dix} trucking transport costs (euros/a/kg)'] = total_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
-        hexagons_gdf[f'{dix} feedstock trucking transport costs (euros/a/kg)'] = feedstock_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
-        hexagons_gdf[f'{dix} product trucking transport costs (euros/a/kg)'] = demand_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
+        hexagons_gdf[f'{dix} road construction costs (euros/kg/year)'] = road_construction_costs
+        hexagons_gdf[f'{dix} Total road transport costs (euros/kg/year)'] = total_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
+        hexagons_gdf[f'{dix} feedstock trucking transport costs (euros/kg/year)'] = feedstock_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
+        hexagons_gdf[f'{dix} product trucking transport costs (euros/kg/year)'] = demand_trucking_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
         
         # rail costs
+        hexagons_gdf[f'{dix} rail construction costs (euros/kg/year)'] = rail_construction_costs
+        hexagons_gdf[f'{dix} Total rail transport costs (euros/kg/year)'] = total_train_costs # cost of rail construction, supply conversion, train transport, and demand conversion
+        hexagons_gdf[f'{dix} feedstock train transport costs (euros/kg/year)'] = feedstock_train_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
+        hexagons_gdf[f'{dix} product train transport costs (euros/kg/year)'] = demand_train_costs # cost of road construction, supply conversion, trucking transport, and demand conversion
+        
+        # minimum transport
+        hexagons_gdf[f'{dix} Total minimum transport costs (euros/kg/year)'] = min_transport_costs # cost of rail construction, supply conversion, train transport, and demand conversion
+        hexagons_gdf[f'{dix} Minimum transport method'] = min_transport_method
+        
         # off-grid costs
         hexagons_gdf[f'{dix} PV capacity'] = pv_capacities
         hexagons_gdf[f'{dix} Wind capacity'] = wind_capacities
         hexagons_gdf[f'{dix} Battery capacity'] = battery_capacities
-        hexagons_gdf[f'{dix} offgrid lcomf (euros/a/kg)'] = offgrid_lcoms
+        hexagons_gdf[f'{dix} offgrid lcomf (euros/kg/year)'] = offgrid_lcoms
+        
         # grid costs
-        hexagons_gdf[f'{dix} grid lcomf (euros/a/kg)'] = grid_lcoms
+        hexagons_gdf[f'{dix} grid construction (euros/kg/year)'] = grid_construction_costs
+        hexagons_gdf[f'{dix} grid lcomf (euros/kg/year)'] = grid_lcoms
         # total costs
         hexagons_gdf[f'{dix} total offgrid lcom'] = total_offgrid_lcoms
         hexagons_gdf[f'{dix} total grid lcom'] = total_grid_lcoms
         hexagons_gdf[f'{dix} feedstock locs'] = feedstock_locs
         
-        # hexagons_gdf[f'{dix} trucking state'] = trucking_states # cost of road construction, supply conversion, trucking transport, and demand conversion
-        # hexagons_gdf[f'{dix} pipeline transport and conversion costs'] = pipeline_costs # cost of supply conversion, pipeline transport, and demand conversion
-    output_path = os.path.join("Data", "Resources", f"{country_name_clean}_hex_GeoX_final.geojson")
+        # exit demand loop
+        
+    output_path = os.path.join("Resources", f"{country_name_clean}_hex_GeoX_final.geojson")
     hexagons_gdf.to_file(output_path, driver='GeoJSON', encoding='utf-8')
