@@ -121,7 +121,7 @@ def combine_glaes_spider(country_names, spider_hex_path=None,
 def determine_feedstock_sources(feedstock_points_gdf, hexagon_to_feedstock_distance_matrix, hix, feedstock_quantity):
     feedstock_ranked = feedstock_points_gdf.merge(hexagon_to_feedstock_distance_matrix.loc[hix,:], left_index=True, right_index=True).sort_values(by=hix)[["Annual capacity [kg/a]"]]
     feedstock_ranked["Cumulative [kg/a]"] = feedstock_ranked.cumsum()
-    feedstock_ranked["Feedstock used [kg/a]"] = 0
+    feedstock_ranked["Feedstock used [kg/a]"] = 0.0
     remaining_quantity = feedstock_quantity
     for f, feedstock in feedstock_ranked.iterrows():
         if remaining_quantity <= 0:
@@ -1105,6 +1105,17 @@ def optimize_ES_gridconnected(wind_potential, pv_potential, times,
     # print(lcom)
     
     return lcom, wind_capacity, solar_capacity, battery_capacity, grid_capacity, n
+
+
+def grid_connection(demand, elec_kWh_per_kg, product_quantity, country_series):
+    
+    grid_capacity = (elec_kWh_per_kg
+                        * demand).max().iloc[0]/1000 # in MW if hourly data
+    grid_energy_cost = ((elec_kWh_per_kg * demand * country_series["Electricity price (euros/kWh)"]).sum().iloc[0]
+                        + (grid_capacity * country_series["Grid connection cost (euros/kW)"] * 1000
+                                      * CRF(country_series['Plant interest rate'], country_series['Plant lifetime (years)'])))
+    grid_energy_cost_per_kg = grid_energy_cost / product_quantity
+    return grid_energy_cost_per_kg, grid_capacity
 
 #%% facility construction
 def mineral_conversion_stand(final_state, quantity, interest,
