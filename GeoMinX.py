@@ -29,6 +29,7 @@ logging.basicConfig(level=logging.ERROR)
 #   should these be added to the global_data parameter file?
 # =============================================================================
 country_names = ["Zambia"]  # Multiple countries is not yet implemented, see note below.
+scenario_code = ""
 demand_states = ['CuAnode', 'CuCathode']
 combine_spider_glaes = False
 
@@ -537,5 +538,5 @@ for country_name in country_names:
 
         # exit demand loop
 
-    output_path = os.path.join("Resources", f"{country_name_clean}_hex_GeoX_final.geojson")
+    output_path = os.path.join("Resources", f"{country_name_clean}{scenario_code}_hex_GeoX_final.geojson")
     hexagons_gdf.to_file(output_path, driver='GeoJSON', encoding='utf-8')
